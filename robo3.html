@@ -1,0 +1,263 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>巨大ロボット破壊シミュレーター（音＋ジャンプ＋レーザー版）</title>
+<style>body{margin:0;overflow:hidden;background:black;}</style>
+</head>
+<body>
+<script type="module">
+import * as THREE from 'https://cdn.jsdelivr.net/npm/three@0.158.0/build/three.module.js';
+import * as CANNON from 'https://cdn.jsdelivr.net/npm/cannon-es@0.20.0/dist/cannon-es.js';
+
+// =========================
+// Three.js 初期化
+// =========================
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x000000);
+const camera = new THREE.PerspectiveCamera(75, window.innerWidth/window.innerHeight, 0.1, 1000);
+const renderer = new THREE.WebGLRenderer({antialias:true});
+renderer.setSize(window.innerWidth, window.innerHeight);
+document.body.appendChild(renderer.domElement);
+
+const light = new THREE.DirectionalLight(0xffffff,1);
+light.position.set(30,50,30);
+scene.add(light);
+scene.add(new THREE.AmbientLight(0x333333));
+
+// =========================
+// Cannon.js 物理設定
+// =========================
+const world = new CANNON.World({ gravity: new CANNON.Vec3(0,-9.82,0) });
+
+// 地面
+const groundBody = new CANNON.Body({ type:CANNON.Body.STATIC, shape:new CANNON.Plane() });
+groundBody.quaternion.setFromEuler(-Math.PI/2,0,0);
+world.addBody(groundBody);
+const groundMesh = new THREE.Mesh(
+  new THREE.PlaneGeometry(50,50),
+  new THREE.MeshStandardMaterial({color:0x333333})
+);
+groundMesh.rotation.x = -Math.PI/2;
+scene.add(groundMesh);
+
+// =========================
+// Web Audio 3D
+// =========================
+const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+const listener = audioCtx.listener;
+function updateListenerPosition(pos){
+  listener.positionX.value = pos.x;
+  listener.positionY.value = pos.y;
+  listener.positionZ.value = pos.z;
+}
+function playExplosionSound3D(position){
+  const osc = audioCtx.createOscillator();
+  osc.type = 'square';
+  osc.frequency.setValueAtTime(60 + Math.random()*40, audioCtx.currentTime);
+
+  const gain = audioCtx.createGain();
+  gain.gain.setValueAtTime(1, audioCtx.currentTime);
+  gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.6);
+
+  const panner = new PannerNode(audioCtx, {
+    panningModel: 'HRTF',
+    distanceModel: 'linear',
+    positionX: position.x,
+    positionY: position.y,
+    positionZ: position.z,
+    refDistance: 1,
+    maxDistance: 50,
+    rolloffFactor: 1
+  });
+
+  const filter = audioCtx.createBiquadFilter();
+  filter.type = 'lowpass';
+  filter.frequency.setValueAtTime(800 + Math.random()*400, audioCtx.currentTime);
+
+  osc.connect(filter).connect(gain).connect(panner).connect(audioCtx.destination);
+  osc.start();
+  osc.stop(audioCtx.currentTime+0.7);
+}
+
+// =========================
+// ロボット
+// =========================
+class Robot {
+  constructor(x,z,color){
+    const bodyGeo = new THREE.BoxGeometry(1,2,1);
+    const bodyMat = new THREE.MeshStandardMaterial({color});
+    this.bodyMesh = new THREE.Mesh(bodyGeo, bodyMat);
+    this.bodyMesh.position.set(x,1,z);
+    scene.add(this.bodyMesh);
+
+    const shape = new CANNON.Box(new CANNON.Vec3(0.5,1,0.5));
+    this.body = new CANNON.Body({ mass:5, shape });
+    this.body.position.set(x,1,z);
+    world.addBody(this.body);
+
+    this.canJump = false;
+    this.jumpCooldown = 0;
+  }
+
+  update(keys){
+    const moveSpeed = 0.1;
+    if(keys['w']) this.body.position.z -= moveSpeed;
+    if(keys['s']) this.body.position.z += moveSpeed;
+    if(keys['a']) this.body.position.x -= moveSpeed;
+    if(keys['d']) this.body.position.x += moveSpeed;
+
+    // ジャンプ
+    if(keys['Shift'] && this.canJump && this.jumpCooldown<=0){
+      this.body.velocity.y = 6;
+      this.canJump = false;
+      this.jumpCooldown = 30;
+      playExplosionSound3D(this.body.position); // 着地の衝撃音
+    }
+    if(this.jumpCooldown>0) this.jumpCooldown--;
+
+    if(this.body.position.y<=1.01){
+      this.canJump = true;
+      this.body.velocity.y = 0;
+      this.body.position.y = 1;
+    }
+
+    this.bodyMesh.position.copy(this.body.position);
+    this.bodyMesh.quaternion.copy(this.body.quaternion);
+  }
+}
+
+const robot = new Robot(0,0,0xff0000);
+
+// =========================
+// 街生成
+// =========================
+let buildings = [];
+function createBuilding(x,z,height,width,color){
+  const pieces = [];
+  const rows = Math.ceil(height/0.3);
+  const cols = Math.ceil(width/0.3);
+  for(let i=0;i<rows;i++){
+    for(let j=0;j<cols;j++){
+      const geo = new THREE.BoxGeometry(0.3,0.3,0.3);
+      const mat = new THREE.MeshStandardMaterial({color});
+      const mesh = new THREE.Mesh(geo, mat);
+      mesh.position.set(x + j*0.3 - width/2 + 0.15, 0.15+i*0.3, z);
+      scene.add(mesh);
+      const shape = new CANNON.Box(new CANNON.Vec3(0.15,0.15,0.15));
+      const body = new CANNON.Body({ mass:1, shape });
+      body.position.copy(mesh.position);
+      world.addBody(body);
+      pieces.push({mesh,body});
+    }
+  }
+  buildings.push(pieces);
+}
+
+for(let i=-10;i<=10;i+=3){
+  for(let j=-10;j<=10;j+=3){
+    createBuilding(i,j,Math.random()*2+0.5,Math.random()*1+0.5,Math.random()*0xffffff);
+  }
+}
+
+// =========================
+// 爆発エフェクト＋レーザー
+// =========================
+const particles = [];
+function createExplosion(pos){
+  playExplosionSound3D(pos);
+  for(let i=0;i<10;i++){
+    const geo = new THREE.SphereGeometry(0.05,6,6);
+    const mat = new THREE.MeshStandardMaterial({color:0xffaa00});
+    const p = new THREE.Mesh(geo, mat);
+    p.position.copy(pos);
+    scene.add(p);
+    p.userData.velocity = new THREE.Vector3(
+      (Math.random()-0.5)*0.5,
+      Math.random()*0.5+0.1,
+      (Math.random()-0.5)*0.5
+    );
+    p.userData.life = 30;
+    particles.push(p);
+  }
+}
+
+const lasers = [];
+function shootLaser(){
+  const geo = new THREE.CylinderGeometry(0.05,0.05,2,8);
+  const mat = new THREE.MeshBasicMaterial({color:0xff0000});
+  const laser = new THREE.Mesh(geo, mat);
+  laser.rotation.x = Math.PI/2;
+  laser.position.set(robot.body.position.x, robot.body.position.y+1, robot.body.position.z);
+  scene.add(laser);
+  const dir = new THREE.Vector3(0,0,-1);
+  lasers.push({mesh:laser,dir,speed:0.8,life:120});
+}
+
+function updateLasers(){
+  for(let i=lasers.length-1;i>=0;i--){
+    const l = lasers[i];
+    l.mesh.position.addScaledVector(l.dir,l.speed);
+    l.life--;
+    if(l.life<=0){
+      scene.remove(l.mesh);
+      lasers.splice(i,1);
+      continue;
+    }
+    // 衝突検出
+    buildings.forEach(group=>{
+      group.forEach(p=>{
+        const dist = l.mesh.position.distanceTo(p.mesh.position);
+        if(dist<0.4){
+          p.body.applyImpulse(new CANNON.Vec3(0,2,0), p.body.position);
+          p.mesh.material.color.set(0xffff00);
+          createExplosion(p.body.position);
+        }
+      });
+    });
+  }
+}
+
+// =========================
+// 入力
+// =========================
+const keys = {};
+document.addEventListener('keydown', e=>{
+  keys[e.key] = true;
+  if(e.key === ' '){ shootLaser(); }
+  if(audioCtx.state==="suspended") audioCtx.resume();
+});
+document.addEventListener('keyup', e=>keys[e.key] = false);
+
+// =========================
+// アニメーション
+// =========================
+function animate(){
+  requestAnimationFrame(animate);
+  robot.update(keys);
+  updateLasers();
+  world.step(1/60);
+  updateListenerPosition(robot.body.position);
+
+  buildings.forEach(g=>g.forEach(p=>{
+    p.mesh.position.copy(p.body.position);
+    p.mesh.quaternion.copy(p.body.quaternion);
+  }));
+
+  for(let i=particles.length-1;i>=0;i--){
+    const p = particles[i];
+    p.position.add(p.userData.velocity);
+    p.userData.velocity.y -= 0.02;
+    p.userData.life--;
+    if(p.userData.life<=0){ scene.remove(p); particles.splice(i,1); }
+  }
+
+  const t = robot.body.position;
+  camera.position.set(t.x+10,t.y+8,t.z+10);
+  camera.lookAt(t);
+  renderer.render(scene, camera);
+}
+animate();
+</script>
+</body>
+</html>

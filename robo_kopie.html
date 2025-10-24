@@ -1,0 +1,193 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>巨大ロボット破壊シネマティック</title>
+<style>body{margin:0;overflow:hidden;}</style>
+</head>
+<body>
+
+<script type="module">
+import * as THREE from 'https://cdn.jsdelivr.net/npm/three@0.158.0/build/three.module.js';
+import * as CANNON from 'https://cdn.jsdelivr.net/npm/cannon-es@0.20.0/dist/cannon-es.js';
+
+
+// ------------------------
+// Three.js セットアップ
+// ------------------------
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(75, window.innerWidth/window.innerHeight, 0.1, 1000);
+const renderer = new THREE.WebGLRenderer({antialias:true});
+renderer.setSize(window.innerWidth, window.innerHeight);
+document.body.appendChild(renderer.domElement);
+
+const light = new THREE.DirectionalLight(0xffffff,1);
+light.position.set(20,50,20);
+scene.add(light);
+
+// ------------------------
+// Cannon.js セットアップ
+// ------------------------
+const world = new CANNON.World({ gravity: new CANNON.Vec3(0,-9.82,0) });
+
+// 地面
+const groundBody = new CANNON.Body({ type:CANNON.Body.STATIC, shape:new CANNON.Plane() });
+groundBody.quaternion.setFromEuler(-Math.PI/2,0,0);
+world.addBody(groundBody);
+
+const groundGeo = new THREE.PlaneGeometry(50,50);
+const groundMat = new THREE.MeshStandardMaterial({color:0x444444});
+const groundMesh = new THREE.Mesh(groundGeo, groundMat);
+groundMesh.rotation.x = -Math.PI/2;
+scene.add(groundMesh);
+
+// ------------------------
+// ロボット
+// ------------------------
+const bodyGeo = new THREE.BoxGeometry(1,2,1);
+const bodyMat = new THREE.MeshStandardMaterial({color:0xff0000});
+const body = new THREE.Mesh(bodyGeo, bodyMat);
+body.position.y = 1;
+scene.add(body);
+
+const armGeo = new THREE.BoxGeometry(0.3,1,0.3);
+const armMat = new THREE.MeshStandardMaterial({color:0x0000ff});
+const leftArm = new THREE.Mesh(armGeo, armMat);
+const rightArm = new THREE.Mesh(armGeo, armMat);
+scene.add(leftArm);
+scene.add(rightArm);
+
+// ------------------------
+// 街生成（建物を小ブロック化）
+// ------------------------
+let buildings = [];
+
+function createBuilding(x,z,height){
+  const pieces = [];
+  const rows = Math.ceil(height/0.3);
+  for(let i=0;i<rows;i++){
+    const geo = new THREE.BoxGeometry(0.3,0.3,0.3);
+    const mat = new THREE.MeshStandardMaterial({color:0x00ff00});
+    const mesh = new THREE.Mesh(geo, mat);
+    mesh.position.set(x, 0.15 + i*0.3, z);
+    scene.add(mesh);
+
+    const shape = new CANNON.Box(new CANNON.Vec3(0.15,0.15,0.15));
+    const bodyPhys = new CANNON.Body({ mass:1, shape:shape });
+    bodyPhys.position.copy(mesh.position);
+    world.addBody(bodyPhys);
+
+    pieces.push({mesh:mesh, body:bodyPhys});
+  }
+  buildings.push(pieces);
+}
+
+// 街をランダムに生成
+for(let i=-10;i<=10;i+=2){
+  for(let j=-10;j<=10;j+=2){
+    const h = Math.random()*2+0.5;
+    createBuilding(i, j, h);
+  }
+}
+
+// ------------------------
+// 爆発パーティクル
+// ------------------------
+const particles = [];
+function createExplosion(pos){
+  for(let i=0;i<10;i++){
+    const geo = new THREE.SphereGeometry(0.05,6,6);
+    const mat = new THREE.MeshStandardMaterial({color:0xffaa00});
+    const p = new THREE.Mesh(geo, mat);
+    p.position.copy(pos);
+    scene.add(p);
+    p.userData.velocity = new THREE.Vector3(
+      (Math.random()-0.5)*0.5,
+      Math.random()*0.5+0.1,
+      (Math.random()-0.5)*0.5
+    );
+    p.userData.life = 30; // フレーム寿命
+    particles.push(p);
+  }
+}
+
+// ------------------------
+// 操作
+// ------------------------
+const keys = {};
+document.addEventListener('keydown', e=>keys[e.key]=true);
+document.addEventListener('keyup', e=>keys[e.key]=false);
+
+let armAngle = 0;
+let armDirection = 1;
+
+// ------------------------
+// アニメーション
+// ------------------------
+function animate(){
+  requestAnimationFrame(animate);
+
+  // 移動
+  if(keys['w']) body.position.z -= 0.1;
+  if(keys['s']) body.position.z += 0.1;
+  if(keys['a']) body.position.x -= 0.1;
+  if(keys['d']) body.position.x += 0.1;
+
+  // 腕振り
+  armAngle += 0.05 * armDirection;
+  if(armAngle>0.5 || armAngle<-0.5) armDirection*=-1;
+  leftArm.rotation.z = armAngle;
+  rightArm.rotation.z = -armAngle;
+
+  leftArm.position.set(body.position.x-0.8, body.position.y+1.5, body.position.z);
+  rightArm.position.set(body.position.x+0.8, body.position.y+1.5, body.position.z);
+
+  // 腕で建物を叩く
+  buildings.forEach(pieceGroup=>{
+    pieceGroup.forEach(p=>{
+      const dx = p.body.position.x - (body.position.x + 0.8*Math.sign(armAngle));
+      const dz = p.body.position.z - body.position.z;
+      const dist = Math.sqrt(dx*dx + dz*dz);
+      if(dist<0.5 && Math.abs(armAngle)>0.3){
+        const force = 5 * Math.abs(armAngle);
+        p.body.applyImpulse(new CANNON.Vec3(force*Math.sign(armAngle),0,0), p.body.position);
+        createExplosion(p.body.position); // 爆発生成
+      }
+    });
+  });
+
+  // 物理更新
+  world.step(1/60);
+
+  // メッシュ更新
+  buildings.forEach(pieceGroup=>{
+    pieceGroup.forEach(p=>{
+      p.mesh.position.copy(p.body.position);
+      p.mesh.quaternion.copy(p.body.quaternion);
+    });
+  });
+
+  // 爆発パーティクル更新
+  for(let i=particles.length-1;i>=0;i--){
+    const p = particles[i];
+    p.position.add(p.userData.velocity);
+    p.userData.velocity.y -= 0.02; // 重力
+    p.userData.life--;
+    if(p.userData.life<=0){
+      scene.remove(p);
+      particles.splice(i,1);
+    }
+  }
+
+  // カメラ追従
+  camera.position.x = body.position.x +5;
+  camera.position.y = body.position.y +5;
+  camera.position.z = body.position.z +10;
+  camera.lookAt(body.position);
+
+  renderer.render(scene, camera);
+}
+animate();
+</script>
+</body>
+</html>

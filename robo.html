@@ -1,0 +1,217 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>巨大ロボット破壊シミュレーター（3Dサウンド版）</title>
+<style>body{margin:0;overflow:hidden;background:black;}</style>
+</head>
+<body>
+<script type="module">
+import * as THREE from 'https://cdn.jsdelivr.net/npm/three@0.158.0/build/three.module.js';
+import * as CANNON from 'https://cdn.jsdelivr.net/npm/cannon-es@0.20.0/dist/cannon-es.js';
+
+// =========================
+// Three.js 初期化
+// =========================
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x000000);
+const camera = new THREE.PerspectiveCamera(75, window.innerWidth/window.innerHeight, 0.1, 1000);
+const renderer = new THREE.WebGLRenderer({antialias:true});
+renderer.setSize(window.innerWidth, window.innerHeight);
+document.body.appendChild(renderer.domElement);
+
+const light = new THREE.DirectionalLight(0xffffff,1);
+light.position.set(30,50,30);
+scene.add(light);
+scene.add(new THREE.AmbientLight(0x333333));
+
+// =========================
+// Cannon.js 物理設定
+// =========================
+const world = new CANNON.World({ gravity: new CANNON.Vec3(0,-9.82,0) });
+
+// 地面
+const groundBody = new CANNON.Body({ type:CANNON.Body.STATIC, shape:new CANNON.Plane() });
+groundBody.quaternion.setFromEuler(-Math.PI/2,0,0);
+world.addBody(groundBody);
+const groundMesh = new THREE.Mesh(
+  new THREE.PlaneGeometry(50,50),
+  new THREE.MeshStandardMaterial({color:0x333333})
+);
+groundMesh.rotation.x = -Math.PI/2;
+scene.add(groundMesh);
+
+// ----- ロボット -----
+class Robot {
+  constructor(x,z,color){
+    const bodyGeo = new THREE.BoxGeometry(1,2,1);
+    const bodyMat = new THREE.MeshStandardMaterial({color});
+    this.body = new THREE.Mesh(bodyGeo, bodyMat);
+    this.body.position.set(x,1,z);
+    scene.add(this.body);
+
+    const armGeo = new THREE.BoxGeometry(0.3,1,0.3);
+    const armMat = new THREE.MeshStandardMaterial({color:0x0000ff});
+    this.leftArm = new THREE.Mesh(armGeo, armMat);
+    this.rightArm = new THREE.Mesh(armGeo, armMat);
+    scene.add(this.leftArm, this.rightArm);
+
+    this.armAngle = 0;
+    this.armDirection = 1;
+  }
+  update(keys){
+    if(keys['w']) this.body.position.z -= 0.1;
+    if(keys['s']) this.body.position.z += 0.1;
+    if(keys['a']) this.body.position.x -= 0.1;
+    if(keys['d']) this.body.position.x += 0.1;
+
+    this.armAngle += 0.05*this.armDirection;
+    if(this.armAngle>0.5 || this.armAngle<-0.5) this.armDirection*=-1;
+    this.leftArm.rotation.z = this.armAngle;
+    this.rightArm.rotation.z = -this.armAngle;
+    this.leftArm.position.set(this.body.position.x-0.8, this.body.position.y+1.5, this.body.position.z);
+    this.rightArm.position.set(this.body.position.x+0.8, this.body.position.y+1.5, this.body.position.z);
+  }
+}
+const robots = [ new Robot(0,0,0xff0000) ];
+
+// ----- 建物生成 -----
+let buildings = [];
+function createBuilding(x,z,height,width,color){
+  const pieces = [];
+  const rows = Math.ceil(height/0.3);
+  const cols = Math.ceil(width/0.3);
+  for(let i=0;i<rows;i++){
+    for(let j=0;j<cols;j++){
+      const geo = new THREE.BoxGeometry(0.3,0.3,0.3);
+      const mat = new THREE.MeshStandardMaterial({color});
+      const mesh = new THREE.Mesh(geo, mat);
+      mesh.position.set(x + j*0.3 - width/2 + 0.15, 0.15+i*0.3, z);
+      scene.add(mesh);
+      const shape = new CANNON.Box(new CANNON.Vec3(0.15,0.15,0.15));
+      const body = new CANNON.Body({ mass:1, shape });
+      body.position.copy(mesh.position);
+      world.addBody(body);
+      pieces.push({mesh,body});
+    }
+  }
+  buildings.push(pieces);
+}
+for(let i=-10;i<=10;i+=3){
+  for(let j=-10;j<=10;j+=3){
+    createBuilding(i,j,Math.random()*2+0.5,Math.random()*1+0.5,Math.random()*0xffffff);
+  }
+}
+
+// ----- Web Audio 3D -----
+const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+const listener = audioCtx.listener;
+
+function updateListenerPosition(pos){
+  listener.positionX.value = pos.x;
+  listener.positionY.value = pos.y;
+  listener.positionZ.value = pos.z;
+}
+
+function playExplosionSound3D(position){
+  const baseFreq = 40 + Math.random()*40;
+  const osc = audioCtx.createOscillator();
+  osc.type = 'square';
+  osc.frequency.setValueAtTime(baseFreq, audioCtx.currentTime);
+
+  const gain = audioCtx.createGain();
+  gain.gain.setValueAtTime(1, audioCtx.currentTime);
+  gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.6);
+
+  // 位置情報で音の方向を制御
+  const panner = new PannerNode(audioCtx, {
+    panningModel: 'HRTF',
+    distanceModel: 'linear',
+    positionX: position.x,
+    positionY: position.y,
+    positionZ: position.z,
+    refDistance: 1,
+    maxDistance: 50,
+    rolloffFactor: 1
+  });
+
+  const filter = audioCtx.createBiquadFilter();
+  filter.type = 'lowpass';
+  filter.frequency.setValueAtTime(800 + Math.random()*400, audioCtx.currentTime);
+
+  osc.connect(filter).connect(gain).connect(panner).connect(audioCtx.destination);
+  osc.start();
+  osc.stop(audioCtx.currentTime+0.7);
+}
+
+// ----- 爆発パーティクル -----
+const particles = [];
+function createExplosion(pos){
+  playExplosionSound3D(pos);
+  for(let i=0;i<10;i++){
+    const geo = new THREE.SphereGeometry(0.05,6,6);
+    const mat = new THREE.MeshStandardMaterial({color:0xffaa00});
+    const p = new THREE.Mesh(geo, mat);
+    p.position.copy(pos);
+    scene.add(p);
+    p.userData.velocity = new THREE.Vector3(
+      (Math.random()-0.5)*0.5,
+      Math.random()*0.5+0.1,
+      (Math.random()-0.5)*0.5
+    );
+    p.userData.life = 30;
+    particles.push(p);
+  }
+}
+
+// ----- 入力 -----
+const keys = {};
+document.addEventListener('keydown', e=>{
+  keys[e.key]=true;
+  if(audioCtx.state==="suspended") audioCtx.resume();
+});
+document.addEventListener('keyup', e=>keys[e.key]=false);
+
+// ----- アニメーション -----
+function animate(){
+  requestAnimationFrame(animate);
+  robots.forEach(r=>r.update(keys));
+  updateListenerPosition(robots[0].body.position);
+
+  robots.forEach(r=>{
+    buildings.forEach(group=>{
+      group.forEach(p=>{
+        const dx = p.body.position.x - (r.body.position.x + 0.8*Math.sign(r.armAngle));
+        const dz = p.body.position.z - r.body.position.z;
+        const dist = Math.sqrt(dx*dx + dz*dz);
+        if(dist<0.6 && Math.abs(r.armAngle)>0.3){
+          p.body.applyImpulse(new CANNON.Vec3(5*Math.sign(r.armAngle),0,0), p.body.position);
+          createExplosion(p.body.position);
+        }
+      });
+    });
+  });
+
+  world.step(1/60);
+  buildings.forEach(g=>g.forEach(p=>{
+    p.mesh.position.copy(p.body.position);
+    p.mesh.quaternion.copy(p.body.quaternion);
+  }));
+
+  for(let i=particles.length-1;i>=0;i--){
+    const p = particles[i];
+    p.position.add(p.userData.velocity);
+    p.userData.velocity.y -= 0.02;
+    p.userData.life--;
+    if(p.userData.life<=0){ scene.remove(p); particles.splice(i,1); }
+  }
+
+  const target = robots[0].body.position;
+  camera.position.set(target.x+10, target.y+8, target.z+10);
+  camera.lookAt(target);
+  renderer.render(scene, camera);
+}
+animate();
+</script>
+</body>
+</html>
